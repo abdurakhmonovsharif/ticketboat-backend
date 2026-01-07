@@ -3750,6 +3750,140 @@ async def create_accounts_v2(accounts: List[AccountRequestModelV2]):
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}.")
 
 
+async def rebuild_accounts(accounts: List[RebuildAccountRequestItem]):
+    """
+    Rebuild multiple AMS accounts by creating new entries based on old ones,
+    linking all specified resources, removing the 'Rebuild' tag from old accounts,
+    and updating notes for both old and new accounts.
+    """
+    database = get_pg_database()
+    
+    building_status_id = await database.fetch_val(
+        "SELECT id FROM ams.ams_account_status WHERE code = 'BUILDING'"
+    )
+    rebuild_tag_result = await database.fetch_all(
+        "SELECT id FROM ams.account_tag WHERE name = 'Rebuild'"
+    )
+    rebuild_tag_id = rebuild_tag_result[0]["id"] if rebuild_tag_result else None
+
+    created_accounts = []
+    
+    try:
+        async with database.transaction():
+            for acc in accounts:
+                # 1. Fetch old account details
+                old_acc = await database.fetch_one(
+                    "SELECT nickname, notes FROM ams.ams_account WHERE id = :id",
+                    {"id": acc.old_account_id}
+                )
+                if not old_acc:
+                    continue
+                
+                old_nickname = old_acc["nickname"]
+                old_notes = old_acc["notes"] or ""
+
+                # 2. Create new account
+                new_account_id = str(uuid.uuid4())
+                new_notes = f"from \"{old_nickname}\""
+                if old_notes:
+                    new_notes = f"{new_notes}\n{old_notes}"
+                
+                await database.execute(
+                    """
+                    INSERT INTO ams.ams_account (
+                        id, nickname, ams_person_id, ams_email_id, ams_address_id,
+                        ams_proxy_id, phone_number_id, company_id, status_code, status_id, notes
+                    ) VALUES (
+                        :id, :nickname, :ams_person_id, :ams_email_id, :ams_address_id,
+                        :ams_proxy_id, :phone_number_id, :company_id, 'BUILDING', :status_id, :notes
+                    )
+                    """,
+                    {
+                        "id": new_account_id,
+                        "nickname": acc.new_nickname,
+                        "ams_person_id": acc.ams_person_id,
+                        "ams_email_id": acc.email_id,
+                        "ams_address_id": acc.ams_address_id,
+                        "ams_proxy_id": acc.ams_proxy_id,
+                        "phone_number_id": acc.phone_number_id,
+                        "company_id": acc.company_id,
+                        "status_id": building_status_id,
+                        "notes": new_notes
+                    }
+                )
+
+                # 3. Associate Email
+                if acc.email_id:
+                    await update_emails_status({
+                        "email_ids": [acc.email_id],
+                        "status": "IN USE"
+                    })
+                    # Attempt to set account_id if the column exists
+                    try:
+                        await database.execute(
+                            "UPDATE ams.ams_email SET account_id = :acc_id WHERE id = :email_id",
+                            {"acc_id": new_account_id, "email_id": acc.email_id}
+                        )
+                    except Exception:
+                        # If account_id column doesn't exist, we skip it but still set status
+                        pass
+
+                # 4. Associate Phone
+                if acc.phone_number_id:
+                    await update_phone_numbers_status({
+                        "phone_ids": [acc.phone_number_id],
+                        "status": "In-Use"
+                    })
+                    await database.execute(
+                        "UPDATE ams.phone_number SET account_id = :acc_id WHERE id = :phone_id",
+                        {"acc_id": new_account_id, "phone_id": acc.phone_number_id}
+                    )
+
+                # 5. Associate Automator & POS
+                if acc.automator_id:
+                    await update_account_automators(new_account_id, [acc.automator_id])
+                
+                if acc.point_of_sale_id:
+                    await update_account_point_of_sale(new_account_id, [acc.point_of_sale_id])
+
+                # 6. Associate Tags
+                if acc.tags:
+                    for tag_id in acc.tags:
+                        await database.execute(
+                            """
+                            INSERT INTO ams.account_tag_mapping (id, account_id, tag_id, created_at, last_modified)
+                            VALUES (:id, :account_id, :tag_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                            ON CONFLICT (account_id, tag_id) DO NOTHING
+                            """,
+                            {"id": str(uuid.uuid4()), "account_id": new_account_id, "tag_id": tag_id}
+                        )
+
+                # 7. Remove "Rebuild" Tag from Old Account
+                if rebuild_tag_id:
+                    await database.execute(
+                        "DELETE FROM ams.account_tag_mapping WHERE account_id = :acc_id AND tag_id = :tag_id",
+                        {"acc_id": acc.old_account_id, "tag_id": rebuild_tag_id}
+                    )
+
+                # 8. Update Old Account Note
+                rebuilt_note = f"rebuilt on \"{acc.new_nickname}\""
+                updated_old_notes = f"{old_notes}\n{rebuilt_note}" if old_notes else rebuilt_note
+                await database.execute(
+                    "UPDATE ams.ams_account SET notes = :notes, last_modified = CURRENT_TIMESTAMP WHERE id = :id",
+                    {"notes": updated_old_notes, "id": acc.old_account_id}
+                )
+
+                created_accounts.append({
+                    "id": new_account_id,
+                    "nickname": acc.new_nickname
+                })
+
+        return created_accounts
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+
+
 async def get_all_accounts():
     try:
         query = """

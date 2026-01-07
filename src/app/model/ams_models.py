@@ -172,6 +172,24 @@ class AccountRequestModelV2(BaseModel):
     point_of_sale: Optional[str] = None
 
 
+class RebuildAccountRequestItem(BaseModel):
+    old_account_id: str
+    new_nickname: str
+    company_id: Optional[str] = None
+    ams_person_id: Optional[str] = None
+    ams_address_id: Optional[str] = None
+    phone_number_id: Optional[str] = None
+    ams_proxy_id: Optional[str] = None
+    automator_id: Optional[str] = None
+    point_of_sale_id: Optional[str] = None
+    email_id: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class RebuildAccountsRequest(BaseModel):
+    accounts: List[RebuildAccountRequestItem]
+
+
 class AccountRequestPayloadV2Model(BaseModel):
     create_mlx_profile: bool = False
     accounts: List[AccountRequestModelV2]

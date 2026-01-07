@@ -1094,6 +1094,17 @@ async def create_accounts_v2(
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
+@router.post("/accounts/rebuild")
+async def rebuild_accounts(
+        payload: RebuildAccountsRequest,
+        user: User = Depends(get_current_user_with_roles(["ams_admin", "ams_accounts_editor"])),
+):
+    try:
+        return await ams_db.rebuild_accounts(payload.accounts)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}.")
+
+
 async def send_account_creation_email(
     accounts: List[dict], requested_by_email: Optional[str] = None
 ) -> None:
